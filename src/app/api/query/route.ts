@@ -67,11 +67,12 @@ export async function POST(request: Request) {
     };
 
     return NextResponse.json(response);
-  } catch (error) {
+  } catch (error: any) {
     console.error("Query error:", error);
+    const isQuota = error?.status === 429 || error?.code === "insufficient_quota";
     return NextResponse.json(
-      { error: "Failed to process query" },
-      { status: 500 }
+      { error: isQuota ? "API quota exceeded. Check your OpenAI billing." : "Failed to process query" },
+      { status: isQuota ? 503 : 500 }
     );
   }
 }

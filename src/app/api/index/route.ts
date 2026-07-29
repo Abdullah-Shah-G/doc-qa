@@ -46,11 +46,12 @@ export async function POST(request: Request) {
     };
 
     return NextResponse.json(response);
-  } catch (error) {
+  } catch (error: any) {
     console.error("Index error:", error);
+    const isQuota = error?.status === 429 || error?.code === "insufficient_quota";
     return NextResponse.json(
-      { error: "Failed to index document" },
-      { status: 500 }
+      { error: isQuota ? "API quota exceeded. Check your OpenAI billing." : "Failed to index document" },
+      { status: isQuota ? 503 : 500 }
     );
   }
 }
