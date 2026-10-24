@@ -1,4 +1,6 @@
 import os
+from uuid import UUID
+from functools import cache
 from pathlib import Path
 from dotenv import load_dotenv
 from pypdf import PdfReader
@@ -11,19 +13,15 @@ load_dotenv()
 
 api_key = os.getenv("GEMINI_API_KEY")
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite",
-    api_key=api_key,
-    max_output_tokens=512,
-    temperature=0.1,
-)
+@cache
+def get_llm():
+    return ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", api_key=api_key, max_output_tokens=512, temperature=0.1)
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/gemini-embedding-001",
-    google_api_key=api_key,
-)
+@cache
+def get_embeddings():
+    return GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=api_key)
 
-VECTOR_STORE_DIR = Path("vector_store")
+VECTOR_STORE_DIR = Path(__file__).resolve().parent / "vector_store"
 VECTOR_STORE_DIR.mkdir(exist_ok=True)
 
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
@@ -32,14 +30,15 @@ SYSTEM_PROMPT = """You are DocAssistant. Use ONLY the retrieved context passages
 
 
 def load_vector_store(doc_id: str) -> FAISS | None:
-    path = VECTOR_STORE_DIR / doc_id
+    path = VECTOR_STORE_DIR / str(UUID(doc_id))
     if path.exists():
-        return FAISS.load_local(str(path), embeddings, allow_dangerous_deserialization=True)
+        # Only load indexes written by this application; never accept uploaded indexes.
+        return FAISS.load_local(str(path), get_embeddings(), allow_dangerous_deserialization=True)
     return None
 
 
 def save_vector_store(vs: FAISS, doc_id: str):
-    path = VECTOR_STORE_DIR / doc_id
+    path = VECTOR_STORE_DIR / str(UUID(doc_id))
     vs.save_local(str(path))
 
 
@@ -47,7 +46,7 @@ def parse_pdf(filepath: str) -> list[dict]:
     reader = PdfReader(filepath)
     pages = []
     for i, page in enumerate(reader.pages, 1):
-        text = page.extract_text()
+        text = page.extract_text() or ""
         if text.strip():
             pages.append({"page": i, "text": text})
     return pages
@@ -64,7 +63,9 @@ def index_document(filepath: str, filename: str, doc_id: str) -> int:
                 metadata={"filename": filename, "page": p["page"], "doc_id": doc_id},
             ))
 
-    vs = FAISS.from_documents(docs, embeddings)
+    if not docs:
+        raise ValueError("PDF has no extractable text. Use a text PDF or run OCR first.")
+    vs = FAISS.from_documents(docs, get_embeddings())
     save_vector_store(vs, doc_id)
     return len(docs)
 
@@ -95,7 +96,7 @@ async def query_document(question: str, doc_id: str, top_k: int = 5) -> dict:
         {"role": "user", "content": full_prompt},
     ]
 
-    result = await llm.ainvoke(messages)
+    result = await get_llm().ainvoke(messages)
     content = result.content
     if isinstance(content, list):
         content = "".join(c.get("text", "") for c in content)
