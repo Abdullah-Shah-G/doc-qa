@@ -1,19 +1,21 @@
 import os
 import uuid
-import shutil
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel, Field
 
 from chain import index_document, query_document
 
 app = FastAPI(title="DocAssistant")
 
-UPLOAD_DIR = Path("uploads")
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-TEMPLATES_DIR = Path("templates")
+TEMPLATES_DIR = BASE_DIR / "templates"
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def render(name: str) -> str:
@@ -21,9 +23,9 @@ def render(name: str) -> str:
 
 
 class QueryRequest(BaseModel):
-    doc_id: str
-    question: str
-    top_k: int = 5
+    doc_id: uuid.UUID
+    question: str = Field(min_length=1, max_length=4000, pattern=r"\S")
+    top_k: int = Field(default=5, ge=1, le=20)
 
 
 @app.get("/")
@@ -41,27 +43,50 @@ async def upload(file: UploadFile = File(...)):
     safe_name = f"{doc_id}{ext}"
     filepath = UPLOAD_DIR / safe_name
 
-    with open(filepath, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    try:
+        size = 0
+        with open(filepath, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "PDF must be no larger than 20 MB.")
+                if size == len(chunk) and not chunk.startswith(b"%PDF-"):
+                    raise HTTPException(400, "Invalid PDF file.")
+                f.write(chunk)
+        if not size:
+            raise HTTPException(400, "Empty PDF file.")
+    except Exception:
+        filepath.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
 
     return JSONResponse({"doc_id": doc_id, "filename": file.filename, "success": True})
 
 
 @app.post("/api/index")
-async def index_doc(doc_id: str, filename: str = ""):
-    ext_candidates = list(UPLOAD_DIR.glob(f"{doc_id}.*"))
-    if not ext_candidates:
+async def index_doc(doc_id: uuid.UUID, filename: str = ""):
+    doc_id = str(doc_id)
+    filepath = UPLOAD_DIR / f"{doc_id}.pdf"
+    if not filepath.is_file():
         return JSONResponse({"error": "Document not found"}, status_code=404)
 
-    filepath = str(ext_candidates[0])
     if not filename:
         filename = os.path.basename(filepath)
 
-    count = index_document(filepath, filename, doc_id)
+    try:
+        count = await run_in_threadpool(index_document, str(filepath), filename, doc_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except Exception:
+        raise HTTPException(503, "Could not index the PDF. Check the file and service configuration.") from None
     return JSONResponse({"doc_id": doc_id, "chunks_count": count, "success": True})
 
 
 @app.post("/api/query")
 async def query(req: QueryRequest):
-    result = await query_document(req.question, req.doc_id, req.top_k)
+    try:
+        result = await query_document(req.question, str(req.doc_id), req.top_k)
+    except Exception:
+        raise HTTPException(503, "The answer service is unavailable. Please try again later.") from None
     return JSONResponse(result)

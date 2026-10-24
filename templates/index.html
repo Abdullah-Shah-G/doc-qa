@@ -39,6 +39,11 @@
 
   <script>
     let activeDoc = null;
+    function escapeHtml(value) {
+      const el = document.createElement("span");
+      el.textContent = String(value);
+      return el.innerHTML;
+    }
 
     const dropZone = document.getElementById("drop-zone");
     const fileInput = document.getElementById("file-input");
@@ -68,6 +73,7 @@
         statusEl.textContent = "Indexing...";
         const idxRes = await fetch(`/api/index?doc_id=${up.doc_id}&filename=${encodeURIComponent(up.filename)}`, { method: "POST" });
         const idx = await idxRes.json();
+        if (!idxRes.ok || !idx.success) throw new Error("Indexing failed");
 
         activeDoc = { docId: up.doc_id, filename: up.filename };
         statusEl.textContent = `Indexed ${idx.chunks_count} chunks from ${up.filename}`;
@@ -94,12 +100,13 @@
           body: JSON.stringify({ doc_id: activeDoc.docId, question, top_k: 5 }),
         });
         const data = await res.json();
+        if (!res.ok) throw new Error("Query failed");
 
-        let html = `<div class="bg-blue-50 rounded p-3 text-sm text-gray-800 whitespace-pre-wrap">${data.answer}</div>`;
+        let html = `<div class="bg-blue-50 rounded p-3 text-sm text-gray-800 whitespace-pre-wrap">${escapeHtml(data.answer)}</div>`;
         if (data.sources?.length) {
           html += '<div class="mt-2 text-xs text-gray-400">Sources:</div>';
           data.sources.forEach(s => {
-            html += `<div class="text-xs text-gray-500">${s.filename}#page:${s.page}</div>`;
+            html += `<div class="text-xs text-gray-500">${escapeHtml(s.filename)}#page:${escapeHtml(s.page)}</div>`;
           });
         }
         answerEl.innerHTML = html;
